@@ -1,0 +1,400 @@
+******************************************************************************
+		CSE-506 (Spring 2019) Homework Assignment #2
+
+ 	    Build a Backup File System Using Stacking Technologies.
+******************************************************************************
+
+Overview : 
+
+When you modify a file in traditional Unix file systems, there's no way to
+undo or recover a previous version of that file. There's also no way to get
+older versions of the same file. Being able to access a history of versions
+of file changes is very useful, to recover lost or inadvertent changes.
+This project is an attempt to build a new file system that automatically 
+creates backup versions of files, and also allows users to view versions as well 
+as recover them.  This Backup File System (bkpfs) handles several 
+tasks via policies that are described in the below sections
+
+* NOTE : Design decisions are written in section B to provide required context.
+
+A. USAGE 
+   Mounting bkpfs can be done as follows:
+   
+	# mount -t bkpfs /some/lower/path /mnt/bkpfs
+
+   or, with mount options supported,
+
+	# mount -t bkpfs -o maxver=7 /some/lower/path  /mnt/bkpfs
+
+    Run the userlevel program as follows:
+
+	# gcc -Wall -Werror bkpfs.c -g -o bkpctl
+
+   Once done, use the below :
+
+  	$ ./bkpctl -[ld:v:r:] FILE
+
+	FILE: the file's name to operate on
+	-l: option to "list versions"
+	-d ARG: option to "delete" versions; ARG can be "newest", "oldest", or "all"
+	-v ARG: option to "view" contents of versions (ARG: "newest", "oldest", or N)
+	-r ARG: option to "restore" file (ARG: "newest" or N)
+		(where N is a number such as 1, 2, 3, ...)	
+	
+B. FILES ALTERED AND ADDED :
+
+  1. Files altered in wrapfs code : 
+
+      bkpfs
+        |----- bkpfs.h
+        |----- main.c
+        |----- inode.c
+        |----- file.c
+     
+      - bkpfs.h 
+	In the header file a new entry has been added to the bkpfs_sb_info 
+	structure. 
+		struct bkpfs_sb_info {
+		        struct super_block *lower_sb;
+        		int maxver; // NEW ENTRY
+		}; 
+	The maxver variable is used to store the maximum number of backup 
+	versions that can be created for a file. 
+
+      - main.c
+	The main purpose for making changes in this file is to accomodate the
+	options passed during the bkpfs mount. The function bkpfs_mount in 
+	main.c is invoked every time the bkpfs is mounted. Therefore, this is
+	the perfect place to fetch and initialise the maxver in the superblock
+	structure. 
+	
+	DESIGN DECISION 1 : WHY ONLY AT SUPERBLOCK LEVEL?
+	 - As the superblok structure for a given file system lies at the top
+	   most level, placing an attribute like maxver here is very efficint. 
+	   All the filesystem objects are connected to this structure and hence
+	   can get maxver with atmost ease.
+	 - In cases where maxver is not provided, this value is defaulted to 5
+
+      - inode.c
+	Once the file system is mounted and a new file is created, the task in
+	hand now is to create a backup file. 
+	
+	DESIGN DECISION 2 : WHEN TO CREATE BACKUPS?
+	 - This file system creates a backup version whenever a file is opened
+	   in write mode. 
+	 - Other alternatives were to make use of time difference between 
+	   last writes or number of chunks modified. Choosing these methods 
+	   would lead to data loss in case two succesive changes were made in
+	   short time spans and you want to revert it to the first change or
+	   in when only few chunks were altered.
+	 - As a result, the backups are created only in cases when a file is 
+	   opened in write mode.
+	
+	The function bkpfs_create in inode.c is invoked whenever a new file is
+	created. In the entire lifecycle of the file, bkpfs_create is called just 
+	once. For this reason, modifications are done in this function to
+	create a new backup folder for the given file. Additionally, the extended
+	attributes to holds the oldest and newest versions are initialised (to 1) 
+	here. In the entire lifecycle of the file, bkpfs_create is called just once.
+
+	DESIGN DECISION 3 : HOW ARE THE BACKUPS STORED?
+	Whenever the bkpfs_create routine is invoked (i.e. when a new file F,
+	is created),  a new directory is created in F's lower file's  working 
+	location. The name of this new directory is the same as the file name,
+	followed by ".bkp" extension. For example, when a new file F is created :
+	
+	* INITIAL STATE	
+ 		
+	test
+	 |----- mntpt
+	 |----- lowerdir
+		  
+	* UPON CREATION OF NEW FILE
+	
+	test
+         |----- mntpt
+	 |	  |-------- F
+	 |	
+         |----- lowerdir
+	 	  |-------- F'
+		  |-------- .F.bkp (Stores the backup files of F)
+
+	DESIGN DECISION 4 : HOW IS VERSIONING/RETENTION IMPLEMENTED? 
+	For versioning, two exteneded attributes are used :
+		a. user.curr_version
+		   This attr stores the newest backup version of a given file
+		   incremented by 1
+		b. user.old_version
+		   This attr stores the oldest backup version of a given file
+	
+	* WORKING : 
+	  Below is the demostration of how versioning is implemented keeping
+	  the maxver constraint intact. (let's say maxver = 3)
+
+	---------------------------------------------------------------------
+	 EVENT		OPERATION		curr_version     old_version 
+	---------------------------------------------------------------------
+	   1	   echo dwight >> office.txt          2                1    	
+	   2       echo dwight >> office.txt          3                1
+	   3       echo dwight >> office.txt          4                1
+	   4       echo dwight >> office.txt          5                2
+	   5       echo dwight >> office.txt          6                3
+	---------------------------------------------------------------------
+	
+	As shown above, when ever version difference exceeds or is equal to
+	the maxver value, the corresponding oldest and newest versions are updated 
+	to accomodate new backups and implement retention.
+
+	
+      - file.c
+	Following new data types were defined to support various functionalities:
+		- struct query_arg_t
+		  This structure contains three values each signifying 
+			- max_ver  : newest version
+			- min_ver  : oldest version
+			- filename : name of the file in question
+		  This struct is populated and sent to the useland whenever the 
+		  user request lisiting backups
+
+		- int new_ver_toggle
+		  This is one of primary things driving the functionality.
+		  This acts like a gate to to either create backups for a given 
+		  file or not. 
+
+	DESIGN DECISION 5 : HOW TO STOP BACKUPS FROM BEING CREATED IN CASE
+			    OF NON WRITE FUNCTIONS ON FILE?
+		The possible options to place the bkpfs_create_backup code were :
+			1. bkpfs_write
+			   Failed for large files, as bkpfs_write is called multiple
+			   times in case large files
+			2. bkpfs_release
+			   This worked becasue release is called just once in the end.
+			   But release is called during all the file ops. Now, we need 
+			   to somehow differentiate bkpfs_write from the rest ops.
+			   Therefore, we set a variable new_ver_toggle in bkpfs_write,
+			   and create backups in release only if this flag is set.	
+			
+
+	Following new functions were added in this file :
+		- bkpfs_create_new_backup
+		    This helper function creates a new backup file for a given file.
+		    This function is invoked each time a file (F) is opened in write
+		    mode. It performed the following steps : 
+		     STEP 1 : Fetch the dentry of the backup folder of F.
+		     STEP 2 : Fetch the xatts for F.
+		     STEP 3 : Generate negative dentry by concatenating F
+			      with its version number.
+		     STEP 4 : Create inode using vfs_create.
+		     STEP 5 : Write contents to the created backup using
+			      vfs_copy_file_range.
+		     STEP 6 : Unlink the oldest version if the version diff
+			      is greater than or equal to maxver.
+		     STEP 7 : Finally, update the newest version value.
+			
+		- bkpfs_unlink_backup
+		    This helper function deleted an existing backup file for a 
+		    given file and version number.
+		    It performed the following steps :
+		     STEP 1 : Fetch the dentry of the backup folder of F.
+		     STEP 2 : Lookup for the file corresponding to version param.
+		     STEP 3 : Lock the backup folder and perform vfs unlink on 
+			      the backup file
+		     STEP 4 : Unlock and return the corresponding error code.
+
+		- bkpfs_get_dentry
+		    Helper function to create dentry with given name in
+		    the given parent dir.
+
+		- bkpfs_get_attr
+		    Helper function to fetch the value of a given extended 
+		    attribute name and file 
+
+		- bkpfs_set_attr
+		    Helper function to set extended attribute of a file 
+		    to given value.
+
+		- bkpfs_filldir
+		    This function is implemented to implement the visibility policy.
+		    Backup versions are made invisible amd inaccessible by default.
+		    This is done for 2 main reasons :	    
+			- It would confuse users ls shows a lot of "extra" files.  
+			- And it defeats the purpose of being able to control the
+			  versions if a user can easily manipulate the versions or 
+			  even delete them too easily.
+		    This function is basically called to filter out and make all the
+		    files whose name ends in ".bkp" invisible to the user by making
+		    use of new dir context.
+
+		- bkpfs_list_version
+	     	    This function is invoked by bkpfs_unlocked_ioctl whenever a 
+		    user request for listing the backups for a given file.
+		    This function fetches the xatts of the given file and copies them
+		    over to the query_arg_t structure. 
+		    In addition, the name of the file is copied into the above struct.
+		    This struct is then made available to the userland using copy_to_user
+		    call, where desired operations are performed for printing contents. 
+	
+		- bkpfs_delete_version
+		    This function is invoked by bkpfs_unlocked_ioctl whenever a
+		    user requets for deletion of a backup file for a given file.
+		    Following steps occure in sequnce to achieve this functionality :
+		      STEP 1 : Fetch the dentry of the backup folder of F.
+		      STEP 2 : Lookup for the file corresponding to version param.
+		      STEP 3 : Fetch the xatts for F i.e. newest and oldest versions
+		      STEP 4 : Update the newest, oldest and all strings to their
+			       corresponding values based on xattr values i.e. 
+			if version == oldest then,
+				version = old_version;
+			else if version == newest then,
+				version = curr_version;
+			else
+		    		loop through all the values between newest and oldest
+			call bkpfs_unlink_backup
+		      STEP 5 : Finally, update the xattr version values.
+
+		- bkpfs_restore_version
+		    This function is invoked by bkpfs_unlocked_ioctl whenever a
+                    user requets to restore of a backup file for a given file. 
+		
+	DESIGN DECISION 6 : HOW TO RESTORE THE BACKUP FILE?
+		Two possible ways to restore a file are either to write the contents 
+		directly onto the original file or, to create a separate file, which
+		the user can inspect, copy and then delete. 
+		
+		- This file system implements the latter approch. This provide an extra
+		  level of safety before the user directly alters the master file. 
+		
+		- Additionally, creating a separate READ-ONLY recovery file, makes it 
+		  easier for user to make changes in parts of the master file
+		  by inspecting and copying contents of the recovered file. 
+		  This wouldn't be possible had we overwritten the entire file.
+		
+		* WORKING :
+
+		  INTITIAL STATE :
+
+			test
+			  |---- mntpt
+			  |	  |------ F
+			  |
+			  |---- lowerdir
+				   |------ F'	
+				   |------ .F.bkp
+					     |------ .F.41
+					     |------ .F.42
+		 
+		  Suppose we  now recover the backup file, .F.41, 
+		  
+		  FINAL STATE :
+	
+			test
+                          |---- mntpt
+                          |       |------ F
+			  |	  |------ F.41.swp (RECOVERED)
+                          |
+                          |---- lowerdir
+                                   |------ F'
+				   |------ .F.41.swp
+                                   |------ .F.bkp
+                                             |------ .F.41
+                                             |------ .F.42		
+	
+		
+	
+	Following already existing functions were altered :
+		- bkpfs_file_release
+		  This function is modified to toggle the create new backup file
+		  flow.
+
+		- bkpfs_unlocked_ioctl
+		  This is used to handle bkpfs-specific system call. This allows 
+		  a userspace application to send it orders. This functions identifies
+		  the user request for lisiting, deleting, viewing and restoring
+		  backups, and calls functions corresponding to each of these actions.	
+
+		- bkpfs_readdir
+		  This function is modified to enable the filtering logic in filldir
+		  and hence exhibit the visibility policy.
+
+		- bkpfs_write
+		  This function is altered to set the new_ver_toggle flag. 
+
+
+	DESIGN DECISION 7 : HOW DOES VIEW OPERATION FUNCTION
+	To implement this functionality there were two possible options:
+	1. Send a buffer with a block's size from user to kernel. Copy 
+	   contents to this buffer in kernel and send it to user where it 
+	   gets printed on stdout. 
+        2. Create a temporary file in the kernal space and write contents 
+	   to it by using the same functionality as recover. Read contents
+	   of the file in userland and delete the file.
+
+	This file system implements the second approach. In the first approach
+	we need to swich modes between kernal and user in the order of 
+	file size. In case of a huge file, the switch occures significant amount
+	of time. Mode switch is usually an expensive operation. Additinally,there
+	is an overhead to maintain the offsets. 
+
+	All these shortcoming of aproach 1 is bypassed by 2. The no. of mode
+	swiches is independent of file size occures only constant number of time
+	for any file.
+
+	* WORKING : Below is an illustration of how viewing is achieved by this fs
+
+		  INTITIAL STATE :
+
+                        test
+                          |---- mntpt
+                          |       |------ F
+                          |
+                          |---- lowerdir
+                                   |------ F'
+                                   |------ .F.bkp
+                                             |------ .F.41
+                                             |------ .F.42
+
+                  Suppose we now perform view on the backup file, .F.41,
+
+                  INTERMEDIATE STATE :
+
+                        test
+                          |---- mntpt
+                          |       |------ F
+                          |       |------ F.41.vue (CONTENTS PRINTED FORM THIS FILE)
+                          |
+                          |---- lowerdir
+                                   |------ F'
+                                   |------ .F.bkp
+                                             |------ .F.41
+                                             |------ .F.42
+
+		  Contents are now printed from the .vue file. On completion, it is 
+		  deleted  
+		  
+		  FINAL STATE : 	
+
+			test
+                          |---- mntpt
+                          |       |------ F
+                          |
+                          |---- lowerdir
+                                   |------ F'
+                                   |------ .F.bkp
+                                             |------ .F.41
+                                             |------ .F.42
+	
+
+  2. Files altered in CSE-506 folder
+	
+	CSE-506
+	   |------ bkpfs.c (User program)
+	   |------ README 
+	   |------ scripts
+		      |----- testXX.sh 	(Test scripts)
+
+C. ASSUMPTIONS :
+
+- It is assumed that the user does not create files whose name end in ".bkp".
+  If the user creates such files, the permission denied error is thrown.
+
+
