@@ -1,1 +1,0 @@
-cmd_fs/bkpfs/built-in.a := rm -f fs/bkpfs/built-in.a; ar rcSTPD fs/bkpfs/built-in.a fs/bkpfs/dentry.o fs/bkpfs/file.o fs/bkpfs/inode.o fs/bkpfs/main.o fs/bkpfs/super.o fs/bkpfs/lookup.o fs/bkpfs/mmap.o
