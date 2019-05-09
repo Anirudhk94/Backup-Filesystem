@@ -30,7 +30,7 @@ A. USAGE
 
    Once done, use the below :
 
-  	$ ./bkpctl -[ld:v:r:] FILE
+  	$ ./bkpctl -[ld: v:r:] FILE
 
 	FILE: the file's name to operate on
 	-l: option to "list versions"
